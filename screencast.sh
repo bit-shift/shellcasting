@@ -11,21 +11,29 @@ source common.sh || exit 1
 depend ffmpeg sox xwininfo xdpyinfo osd_cat
 config
 
-VIDEOPID=${PIDPREFIX}-ffmpeg-video.pid
-AUDIOPID=${PIDPREFIX}-jack_capture.pid
-VOICEPID=${PIDPREFIX}-ffmpeg-voice.pid
-VIDEOLOG=${LOGDIR}/ffmpeg-video.log
-VOICELOG=${LOGDIR}/ffmpeg-voice.log
-AUDIOLOG=${LOGDIR}/ffmpeg-audio.log
-POSTLOG=${LOGDIR}/ffmpeg-post.log
-RECDIR=${RECDIR:-${HOME}/video/new}
-[[ -d "$RECDIR" ]] || RECDIR=$PWD
-VIDEOFILE=${RECDIR}/video.mkv
-VOICEFILE=${RECDIR}/voice.wav
-AUDIOFILE=${RECDIR}/audio.wav
-POSTFILE=${RECDIR}/processed
+VIDEOPID="${PIDPREFIX}-ffmpeg-video.pid"
+AUDIOPID="${PIDPREFIX}-jack_capture.pid"
+VOICEPID="${PIDPREFIX}-ffmpeg-voice.pid"
+VIDEOLOG="${LOGDIR}/ffmpeg-video.log"
+VOICELOG="${LOGDIR}/ffmpeg-voice.log"
+AUDIOLOG="${LOGDIR}/ffmpeg-audio.log"
+POSTLOG="${LOGDIR}/ffmpeg-post.log"
+RECDIR="${RECDIR:-${HOME}/video/new}"
+RECDIR="$(fixpath $RECDIR)"
+[[ -d "$RECDIR" ]] || RECDIR="$PWD"
+VIDEOFILE="${RECDIR}/video.mkv"
+VOICEFILE="${RECDIR}/voice.wav"
+AUDIOFILE="${RECDIR}/audio.wav"
+POSTFILE="${RECDIR}/processed"
+
+clean_recdir() {
+    rm -f ${RECDIR}/{video,video-transcode}.mkv
+    rm -f ${RECDIR}/{voice,voice-fixed,audio,audio-quiet,audio-mixed}.wav
+    rm -f ${RECDIR}/audio-transcode.mka
+}
 
 start_recording() {
+    clean_recdir
     FPS=${FPS:-30}
     QUALITY=${QUALITY:-23}
     MICCHANNELS=${MICCHANNELS:-2}
@@ -33,7 +41,7 @@ start_recording() {
     if [[ -z $WINDOW ]]
     then
         GEO=$(xdpyinfo -display $DISPLAY | grep -oEe 'dimensions:\s+[0-9]+x[0-9]+' | grep -oEe '[0-9]+x[0-9]+')
-        VIDEOOPTS=(-f x11grab -r $FPS -s $GEO -i $DISPLAY)
+        VIDEOOPTS=(-f x11grab -r $FPS -s $GEO -i "$DISPLAY")
     else
         INFO=$(xwininfo)
         WIN_WIDTH="$(echo "$INFO" | grep -oEe 'Width: [0-9]*' | grep -oEe '[0-9]*')"
@@ -42,26 +50,26 @@ start_recording() {
         [[ $(( $WIN_HEIGHT % 2 )) -eq 0 ]] || WIN_HEIGHT=$(( $WIN_HEIGHT + 1 ))
         GEO="${WIN_WIDTH}x${WIN_HEIGHT}"
         OFFSET="$(echo $INFO | grep -oEe 'Corners:\s+\+[0-9]+\+[0-9]+' | grep -oEe '[0-9]+\+[0-9]+' | sed -e 's/\+/,/')"
-        VIDEOOPTS=(-f x11grab -show_region 1 -r $FPS -s $GEO -i ${DISPLAY}+${OFFSET})
+        VIDEOOPTS=(-f x11grab -show_region 1 -r $FPS -s "$GEO" -i "${DISPLAY}+${OFFSET}")
     fi
 
     VIDEOOPTS+=(-vcodec libx264 -preset ultrafast -crf $QUALITY -y)
 
-    ffmpeg "${VIDEOOPTS[@]}" $VIDEOFILE > $VIDEOLOG 2>&1 &
+    ffmpeg "${VIDEOOPTS[@]}" "$VIDEOFILE" > "$VIDEOLOG" 2>&1 &
     echo "$!" > "$VIDEOPID"
 
     if [[ -n $MICSOURCE ]]
     then
-        VOICEOPTS=(-f alsa -ac $MICCHANNELS -i $MICSOURCE)
+        VOICEOPTS=(-f alsa -ac $MICCHANNELS -i "$MICSOURCE")
         VOICEOPTS+=(-y)
-        ffmpeg "${VOICEOPTS[@]}" $VOICEFILE > $VOICELOG 2>&1 &
+        ffmpeg "${VOICEOPTS[@]}" "$VOICEFILE" > "$VOICELOG" 2>&1 &
         echo "$!" > "$VOICEPID"
     fi
 
     [[ -n $(pgrep jackd) ]] || MUTE=1
     if [[ -z $MUTE ]]
     then
-        jack_capture --daemon $AUDIOFILE &
+        jack_capture --daemon "$AUDIOFILE" &
         echo "$!" > "$AUDIOPID"
     fi
 
@@ -120,24 +128,24 @@ stop_recording() {
     fi
     if [[ -n $VIDEOCHECK ]]
     then
-        kill -2 $(cat "$VIDEOPID") && rm -f $VIDEOPID
+        kill -2 $(cat "$VIDEOPID") && rm -f "$VIDEOPID"
     elif [[ -e $VIDEOPID ]]
     then
-        rm -f $VIDEOPID
+        rm -f "$VIDEOPID"
     fi
     if [[ -n $VOICECHECK ]]
     then
-        kill -2 $(cat "$VOICEPID") && rm -f $VOICEPID
+        kill -2 $(cat "$VOICEPID") && rm -f "$VOICEPID"
     elif [[ -e $VOICEPID ]]
     then
         rm -f $VOICEPID
     fi
     if [[ -n $AUDIOCHECK ]]
     then
-        kill -2 $(cat "$AUDIOPID") && rm -f $AUDIOPID
+        kill -2 $(cat "$AUDIOPID") && rm -f "$AUDIOPID"
     elif [[ -e $AUDIOPID ]]
     then
-        rm -f $AUDIOPID
+        rm -f "$AUDIOPID"
     fi
     if [[ -t 0 ]]
     then
@@ -186,14 +194,22 @@ post_process() {
         AUDIOFILE=$VOICEFILE
     fi
 
-    TRANSCODEOPTS=(-i $VIDEOFILE)
-    [[ -z $AUDIOFILE ]] || TRANSCODEOPTS+=(-i $AUDIOFILE)
-    TRANSCODEOPTS+=(-vcodec $VCODEC)
-    [[ -z $AUDIOFILE ]] || TRANSCODEOPTS+=(-acodec $ACODEC -ab $BITRATE)
-    TRANSCODEOPTS+=(-y)
-
     notify "Transcoding... (this may take a while)"
-    ffmpeg "${TRANSCODEOPTS[@]}" ${POSTFILE}.${CONTAINER} > $POSTLOG 2>&1
+    VIDEOOPTS=(-i "$VIDEOFILE" -vcodec "$VCODEC" -y)
+    ffmpeg "${VIDEOOPTS[@]}" "${RECDIR}/video-transcode.mkv" > $POSTLOG 2>&1
+    VIDEOFILE="${RECDIR}/video-transcode.mkv"
+    if [[ -e $AUDIOFILE ]]
+    then
+        AUDIOOPTS=(-i "$AUDIOFILE" -acodec "$ACODEC" -ab $BITRATE -y)
+        ffmpeg "${AUDIOOPTS[@]}" "${RECDIR}/audio-transcode.mka" >> $POSTLOG 2>&1
+        AUDIOFILE="${RECDIR}/audio-transcode.mka"
+    fi
+    TRANSCODEOPTS=(-i "$VIDEOFILE")
+    [[ -e $AUDIOFILE ]] && TRANSCODEOPTS+=(-i "$AUDIOFILE")
+    TRANSCODEOPTS+=(-vcodec copy)
+    [[ -e $AUDIOFILE ]] && TRANSCODEOPTS+=(-acodec copy)
+    TRANSCODEOPTS+=(-y)
+    ffmpeg "${TRANSCODEOPTS[@]}" "${POSTFILE}.${CONTAINER}" >> $POSTLOG 2>&1
     notify "Done."
     exit 0
 }
@@ -203,10 +219,11 @@ usage() {
     echo "Record audio and video from your system.
 
 MODE can be one of:
-  start     Begins a new recording.
+  start     Begins a new recording (auto-cleans RECDIR).
   stop      Finish recording.
   status    Check if you are (still) recording.
   post      Do post-processing of a finished recording.
+  clean     Delete previous recording data from RECDIR.
 
 The following OPTIONS can be set for any MODE:
   --logdir DIR              Location to store log files. (Setting: LOGDIR)
@@ -232,7 +249,7 @@ WARNING: options specified in the config file will override command line
 The following OPTIONS can be set when MODE is \"start\":
   -c, --channels N          Specify number of audio channels output by your
                               microphone. (Default: 2) (Setting: MICCHANNELS)
-  -f, --fps N               Specify video framerate. (Default: 2) (Setting: FPS)
+  -f, --fps N               Specify video framerate. (Default: 30) (Setting: FPS)
   -m, --mute                Don't try to record audio. (Setting: MUTE)
   -q, --quality N           Specify crf value. Lower values raise quality.
                               (Default: 23) (Setting: QUALITY)
@@ -266,42 +283,30 @@ The format of the settings file is the same as any standard bash script."
 }
 
 common_options() {
+    [[ $# -eq 2 ]] || usage
     case "$1" in
+        *dir      )
+            P="$(fixpath $2)"
+            [[ -d $P ]] || die "FATAL ERROR: $P does not exist or is not a directory."
+            ;;&
         --logdir    )
-            shift
-            if [[ -d $1 ]]
-            then
-                LOGDIR="$1"
-            else
-                die "FATAL ERROR: $1 does not exist or is not a directory."
-            fi
+            LOGDIR="$P"
             ;;
         --piddir    )
-            shift
-            if [[ -d $1 ]]
-            then
-                PIDDIR="$1"
-            else
-                die "FATAL ERROR: $1 does not exist or is not a directory."
-            fi
+            PIDDIR="$P"
             ;;
         --recdir    )
-            shift
-            if [[ -d $1 ]]
-            then
-                RECDIR="$1"
-            else
-                die "FATAL ERROR: $1 does not exist or is not a directory."
-            fi
+            RECDIR="$P"
             ;;
         --settings  )
-            shift
-            if [[ -e $1 ]]
+            P="$(fixpath $2)"
+            [[ -z $DEBUG ]] || echo -e "P=$P\n2=$2"
+            if [[ -r $P ]]
             then
-                CONFIG="$1"
+                CONFIG="$P"
                 config
             else
-                die "FATAL ERROR: $1 file not found."
+                die "FATAL ERROR: $P file not found."
             fi
             ;;
         *           )
@@ -342,7 +347,8 @@ case "$MODE" in
                         WINDOW=1
                         ;;
                     *                   )
-                        common_options
+                        common_options "$1" "$2"
+                        shift
                         ;;
                 esac
                 shift
@@ -361,7 +367,8 @@ case "$MODE" in
                     break
                     ;;
                 *               )
-                    common_options
+                    common_options "$1" "$2"
+                    shift
                     ;;
             esac
             shift
@@ -370,8 +377,8 @@ case "$MODE" in
         ;;
     status  )
         while [[ $# -gt 0 ]]; do
-            common_options
-            shift
+            common_options "$1" "$2"
+            shift 2
         done
         check_recording
         exit 0
@@ -428,7 +435,8 @@ case "$MODE" in
                         fi
                         ;;
                     *                   )
-                        common_options
+                        common_options "$1" "$2"
+                        shift
                         ;;
                 esac
                 shift
@@ -437,6 +445,10 @@ case "$MODE" in
         else
             die "You are still recording."
         fi
+        ;;
+    clean   )
+        clean_recdir
+        exit 0
         ;;
     *       )
         usage
